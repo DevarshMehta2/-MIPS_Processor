@@ -1,0 +1,114 @@
+`timescale 1ns / 1ps
+`include "defs.vh"
+
+module Processor(
+    input wire clk,
+    output wire halt,
+    input wire reset,
+    output reg [7:0] pc,
+    input wire [31:0] ins,
+    output wire [31:0] io_reg1,
+    output wire [31:0] io_reg2,
+    output wire [31:0] io_reg3,
+    output wire [31:0] io_reg4,
+    output reg io_stall,
+    output wire [31:0] io_regs_index_out,
+    input wire copied_io_regs,
+    input wire [31:0] input_value,
+    input wire input_value_valid,
+    output reg waiting_for_input,
+    output wire [7:0] data_addr,
+    output wire data_addr_valid,
+    output wire [1:0] data_mem_command,
+    output wire [31:0] store_value,
+    input wire [31:0] load_value
+);
+    reg [2:0] state;
+    localparam FETCH=3'd0, EXE=3'd1, WRITE=3'd2, WAIT_COPY=3'd3, WAIT_UNCOPY=3'd4, WAIT_INPUT=3'd5, MEM_ACCESS=3'd6;
+
+    wire [5:0] opcode = ins[31:26], func = ins[5:0];
+    wire [4:0] rs = ins[25:21], rt = ins[20:16], rd = ins[15:11];
+    
+    reg [5:0] r_op, r_func; 
+    reg [4:0] r_rt, r_rd, r_dest; 
+    reg [31:0] r_s1, r_s2, r_wdata;
+    reg [15:0] r_imm; reg [25:0] r_target;
+    reg [7:0] r_pc, r_br_tgt; reg r_wen, r_br_tk, r_fetched;
+    reg [31:0] io_reg [0:3]; reg [2:0] io_idx;
+    
+    reg [31:0] r_mem_addr; // NEW: Dedicated Byte Address Register
+
+    assign io_reg1 = io_reg[0]; assign io_reg2 = io_reg[1]; assign io_reg3 = io_reg[2]; assign io_reg4 = io_reg[3];
+    assign io_regs_index_out = {29'b0, io_idx};
+    
+    // NEW: Translate Byte Address to Word Address for Memory
+    assign data_addr = r_mem_addr[9:2]; 
+    assign data_addr_valid = (state == MEM_ACCESS);
+    assign data_mem_command = (r_op == `OP_SW) ? `WRITE_COMMAND : (r_op == `OP_SB || r_op == `OP_SH) ? `SUBWORD_WRITE_COMMAND : `READ_COMMAND;
+
+    // Use r_mem_addr[1:0] for byte selection
+    assign store_value = (r_op == `OP_SW) ? r_s2 :
+                         (r_op == `OP_SB) ? (
+                             (r_mem_addr[1:0] == 2'b00) ? {r_s2[7:0], load_value[23:0]} :
+                             (r_mem_addr[1:0] == 2'b01) ? {load_value[31:24], r_s2[7:0], load_value[15:0]} :
+                             (r_mem_addr[1:0] == 2'b10) ? {load_value[31:16], r_s2[7:0], load_value[7:0]} :
+                                                        {load_value[31:8], r_s2[7:0]}
+                         ) : r_s2; 
+
+    wire [31:0] src1, src2, alu_out; wire alu_v, alu_tk;
+    RegisterFile rf (.read_addr1(rs), .read_addr2(rt), .read_data1(src1), .read_data2(src2), .write_addr(r_dest), .write_data(r_wdata), .write_enable(r_wen), .clk(clk));
+    ALU alu (.src1(r_s1), .src2(r_s2), .shift_amount(5'd0), .opcode(r_op), .func(r_func), .imm(r_imm), .pc(r_pc), .rt(r_rt), .jump_target(r_target), .dest(alu_out), .dest_valid(alu_v), .branch_taken(alu_tk));
+
+    assign halt = r_fetched && (r_op == `OP_REG) && (r_func == `FUNC_SYSCALL) && (r_s1 == `SYS_exit);
+
+    always @(posedge clk) begin
+        if (reset == 1'b1) begin 
+            pc <= 8'd0; state <= FETCH; r_fetched <= 1'b0; io_idx <= 3'd0; io_stall <= 1'b0; r_wen <= 1'b0; waiting_for_input <= 1'b0; 
+        end else case (state)
+            FETCH: begin
+                r_op <= opcode; r_func <= func; r_s1 <= src1; r_s2 <= src2; r_pc <= pc; r_rt <= rt; r_rd <= rd;
+                r_imm <= ins[15:0]; r_target <= ins[25:0];
+                r_dest <= (opcode == `OP_REG) ? rd : rt;
+                r_fetched <= 1'b1; r_wen <= 1'b0; state <= EXE;
+            end
+            EXE: begin
+                r_br_tk <= alu_tk; 
+                r_br_tgt <= (r_op == `OP_J || r_op == `OP_JAL) ? r_target[7:0] : 
+                            (r_op == `OP_REG && (r_func == `FUNC_JALR || r_func == `FUNC_JR)) ? r_s1[7:0] : alu_out[7:0];
+                r_mem_addr <= alu_out; // Capture full byte address
+                
+                if (r_op == `OP_LW || r_op == `OP_LB || r_op == `OP_LBU || r_op == `OP_LH || r_op == `OP_LHU || r_op == `OP_SW || r_op == `OP_SB || r_op == `OP_SH) begin
+                    state <= MEM_ACCESS;
+                end else if (r_op == `OP_REG && r_func == `FUNC_SYSCALL) begin
+                    if (r_s1 == `SYS_write) begin
+                        if (io_idx == 3'd4) begin io_stall <= 1'b1; state <= WAIT_COPY; end
+                        else begin io_reg[io_idx[1:0]] <= r_s2; io_idx <= io_idx + 1; state <= WRITE; end
+                    end else if (r_s1 == `SYS_read) begin waiting_for_input <= 1'b1; state <= WAIT_INPUT; end
+                    else state <= WRITE;
+                end else begin r_wdata <= alu_out; r_wen <= alu_v; state <= WRITE; end
+            end
+            MEM_ACCESS: begin
+                if (r_op == `OP_SW || r_op == `OP_SB || r_op == `OP_SH) begin
+                    r_wen <= 1'b0;
+                end else begin
+                    if (r_op == `OP_LW) r_wdata <= load_value;
+                    else if (r_op == `OP_LB) begin
+                        case(r_mem_addr[1:0]) // Mask using true byte address
+                            2'b00: r_wdata <= {{24{load_value[31]}}, load_value[31:24]};
+                            2'b01: r_wdata <= {{24{load_value[23]}}, load_value[23:16]};
+                            2'b10: r_wdata <= {{24{load_value[15]}}, load_value[15:8]};
+                            2'b11: r_wdata <= {{24{load_value[7]}}, load_value[7:0]};
+                        endcase
+                    end
+                    r_wen <= 1'b1;
+                end
+                state <= WRITE;
+            end
+            WRITE: begin r_wen <= 1'b0; if (!halt) pc <= r_br_tk ? r_br_tgt : pc + 8'd1; state <= FETCH; end
+            WAIT_INPUT: if (input_value_valid) begin waiting_for_input <= 1'b0; r_wdata <= input_value; r_wen <= 1'b1; r_dest <= r_rt; state <= WRITE; end
+            WAIT_COPY: if (copied_io_regs) begin io_stall <= 1'b0; state <= WAIT_UNCOPY; end
+            WAIT_UNCOPY: if (!copied_io_regs) begin io_idx <= 3'd0; state <= EXE; end
+            default: state <= FETCH;
+        endcase
+    end
+endmodule
