@@ -1,0 +1,82 @@
+`timescale 1ns / 1ps
+`include "defs.vh"
+
+module Computer(
+    input wire reset, 
+    input wire [7:0] ins_addr, 
+    input wire [31:0] ins, 
+    input wire clk,
+    input wire done_storing, 
+    input wire copied_io_regs, 
+    input wire [31:0] input_value, 
+    input wire input_value_valid,
+    output wire done, 
+    output wire [31:0] out_reg1, 
+    output wire [31:0] out_reg2, 
+    output wire [31:0] out_reg3, 
+    output wire [31:0] out_reg4,
+    output wire [31:0] total_cycles, 
+    output wire [31:0] proc_cycles,
+    output wire io_stall, 
+    output wire [31:0] io_regs_index, 
+    output wire waiting_for_input
+);
+    wire [7:0] pc, d_addr; 
+    wire [31:0] mem_out, s_val; 
+    wire [1:0] d_cmd; 
+    wire halt, d_v;
+    reg [31:0] c_t, c_p; 
+    reg r_done;
+
+    wire we = done_storing ? (d_v && (d_cmd == `WRITE_COMMAND || d_cmd == `SUBWORD_WRITE_COMMAND)) : 1'b1;
+    wire [7:0] addr = done_storing ? (d_v ? d_addr : pc) : ins_addr;
+    wire [1:0] cmd = done_storing ? (d_v ? d_cmd : `READ_COMMAND) : `WRITE_COMMAND;
+
+    Memory mem (
+        .write_enable(we && !reset), 
+        .clk(clk), 
+        .command(cmd), 
+        .address(addr), 
+        .word_in(done_storing ? s_val : ins), 
+        .word_out(mem_out)
+    );
+
+    Processor proc (
+        .clk(clk), 
+        .halt(halt), 
+        .reset(reset | ~done_storing), // CRITICAL FIX: Keeps CPU paused until memory is loaded
+        .pc(pc), 
+        .ins(mem_out), 
+        .io_reg1(out_reg1), 
+        .io_reg2(out_reg2), 
+        .io_reg3(out_reg3), 
+        .io_reg4(out_reg4),
+        .io_stall(io_stall), 
+        .io_regs_index_out(io_regs_index), 
+        .copied_io_regs(copied_io_regs), 
+        .input_value(input_value), 
+        .input_value_valid(input_value_valid), 
+        .waiting_for_input(waiting_for_input),
+        .data_addr(d_addr), 
+        .data_addr_valid(d_v), 
+        .data_mem_command(d_cmd), 
+        .store_value(s_val), 
+        .load_value(mem_out)
+    );
+
+    assign total_cycles = c_t; 
+    assign proc_cycles = c_p; 
+    assign done = r_done;
+    
+    always @(posedge clk) begin
+        if (reset) begin 
+            c_t <= 32'd0; 
+            c_p <= 32'd0; 
+            r_done <= 1'b0; 
+        end else begin 
+            c_t <= c_t + 1; 
+            if (done_storing && !halt) c_p <= c_p + 1; 
+            if (halt) r_done <= 1'b1;
+        end
+    end
+endmodule
