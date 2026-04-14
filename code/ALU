@@ -1,0 +1,36 @@
+`timescale 1ns / 1ps
+`include "defs.vh"
+
+module ALU (
+    input wire [31:0] src1, src2, input wire [4:0] shift_amount, input wire [5:0] opcode, func, 
+    input wire [15:0] imm, input wire [7:0] pc, input wire [4:0] rt, input wire [25:0] jump_target,
+    output reg [31:0] dest, output reg dest_valid, output reg branch_taken
+);
+    wire [31:0] sign_ext_imm = {{16{imm[15]}}, imm};
+    wire [31:0] zero_ext_imm = {16'b0, imm};
+
+    always @(*) begin
+        dest = 32'b0; dest_valid = 1'b0; branch_taken = 1'b0;
+        case (opcode)
+            `OP_REG: begin
+                dest_valid = 1'b1;
+                case (func)
+                    `FUNC_ADD: dest = src1 + src2;
+                    `FUNC_SUB: dest = src1 - src2;
+                    `FUNC_AND: dest = src1 & src2;
+                    `FUNC_OR:  dest = src1 | src2;
+                    `FUNC_SLT: dest = ($signed(src1) < $signed(src2)) ? 32'd1 : 32'd0;
+                    `FUNC_JR:  begin dest = src1; branch_taken = 1'b1; dest_valid = 1'b0; end
+                    `FUNC_SYSCALL: dest_valid = 1'b0;
+                    default: dest_valid = 1'b0;
+                endcase
+            end
+            `OP_ADDI: begin dest = src1 + sign_ext_imm; dest_valid = 1'b1; end
+            `OP_ORI:  begin dest = src1 | zero_ext_imm; dest_valid = 1'b1; end
+            `OP_LUI:  begin dest = {imm, 16'b0}; dest_valid = 1'b1; end
+            `OP_LW, `OP_LB, `OP_LBU, `OP_LH, `OP_LHU: begin dest = src1 + sign_ext_imm; dest_valid = 1'b0; end
+            `OP_SW, `OP_SB, `OP_SH: begin dest = src1 + sign_ext_imm; dest_valid = 1'b0; end
+            default: ;
+        endcase
+    end
+endmodule
