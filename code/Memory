@@ -1,0 +1,22 @@
+`timescale 1ns / 1ps
+`include "defs.vh"
+
+module Memory (
+    input wire write_enable, clk, input wire [1:0] command, input wire [7:0] address, input wire [31:0] word_in,
+    output wire [31:0] word_out
+);
+    reg [31:0] Mem [0:255];
+    integer i;
+    
+    initial begin
+        for (i = 0; i < 256; i = i + 1) Mem[i] = 32'b0;
+    end
+
+    assign word_out = Mem[address];
+
+    always @(posedge clk) begin
+        if (write_enable == 1'b1) begin
+            if (command == `WRITE_COMMAND || command == `SUBWORD_WRITE_COMMAND) Mem[address] <= word_in;
+        end
+    end
+endmodule
